@@ -87,14 +87,37 @@ def download_context(gen, filename, show_filename=True, file_index=1, file_count
                 callback(None)
 
 
-def _http_get(url, temp_file, *, proxies=None, resume_size=0, headers=None, expected_size=None, displayed_filename=None, _nb_retries=5, _tqdm_bar=None):
-    import requests
+def _http_get(url, temp_file, *, proxies=None, resume_size=0, headers=None, expected_size=None, displayed_filename=None, tqdm_class=None, _nb_retries=5, _tqdm_bar=None):
     from huggingface_hub import file_download as hf
+
+    # huggingface_hub >= 1.5 moved downloads from requests to httpx and dropped the
+    # private helpers used below (_request_wrapper, reset_sessions). Support both APIs
+    # so WanGP's progress/cancel patch keeps working across hub versions.
+    try:
+        from huggingface_hub.utils._http import http_stream_backoff, hf_raise_for_status, close_session
+        httpx_mode = True
+    except ImportError:
+        import requests
+        httpx_mode = False
+        close_session = getattr(hf, "reset_sessions", None)
 
     progress = _current_download.get()
     completed = resume_size
     progress.initial = completed
     progress.update(completed, expected_size, force=True)
+
+    def iter_chunks(response):
+        if httpx_mode:
+            yield from response.iter_bytes(chunk_size=256 * 1024)
+        else:
+            yield from response.iter_content(chunk_size=256 * 1024)
+
+    def response_size(response):
+        if httpx_mode:
+            value = response.headers.get("content-length")
+            return int(value) if value is not None else None
+        return hf._get_file_length_from_http_response(response)
+
     while True:
         check_download_cancelled(progress.gen)
         if expected_size is not None and completed == expected_size:
@@ -103,17 +126,30 @@ def _http_get(url, temp_file, *, proxies=None, resume_size=0, headers=None, expe
         if completed:
             request_headers["Range"] = hf._adjust_range_header(request_headers.get("Range"), completed)
         try:
-            with hf._request_wrapper(method="GET", url=url, stream=True, proxies=proxies, headers=request_headers, timeout=hf.constants.HF_HUB_DOWNLOAD_TIMEOUT) as response:
+            if httpx_mode:
+                request_cm = http_stream_backoff(
+                    method="GET",
+                    url=url,
+                    headers=request_headers,
+                    timeout=hf.constants.HF_HUB_DOWNLOAD_TIMEOUT,
+                    retry_on_exceptions=(),
+                    follow_redirects=True,
+                )
+            else:
+                request_cm = hf._request_wrapper(method="GET", url=url, stream=True, proxies=proxies, headers=request_headers, timeout=hf.constants.HF_HUB_DOWNLOAD_TIMEOUT)
+            with request_cm as response:
                 check_download_cancelled(progress.gen)
+                if httpx_mode:
+                    hf_raise_for_status(response)
                 if completed and response.status_code == 200:
                     temp_file.seek(0)
                     temp_file.truncate()
                     completed = progress.initial = 0
-                content_length = hf._get_file_length_from_http_response(response)
+                content_length = response_size(response)
                 total = expected_size if expected_size is not None else content_length
                 progress.update(completed, total, force=True)
-                with hf._get_progress_bar_context(desc=displayed_filename or progress.filename or "Downloading", log_level=hf.logger.getEffectiveLevel(), total=total, initial=completed, name="huggingface_hub.http_get", _tqdm_bar=_tqdm_bar) as bar:
-                    for chunk in response.iter_content(chunk_size=256 * 1024):
+                with hf._get_progress_bar_context(desc=displayed_filename or progress.filename or "Downloading", log_level=hf.logger.getEffectiveLevel(), total=total, initial=completed, name="huggingface_hub.http_get", tqdm_class=tqdm_class, _tqdm_bar=_tqdm_bar) as bar:
+                    for chunk in iter_chunks(response):
                         check_download_cancelled(progress.gen)
                         if chunk:
                             temp_file.write(chunk)
@@ -123,22 +159,28 @@ def _http_get(url, temp_file, *, proxies=None, resume_size=0, headers=None, expe
                             _nb_retries = 5
                 check_download_cancelled(progress.gen)
             break
-        except (requests.ConnectionError, requests.ReadTimeout):
+        except Exception as exception:
             check_download_cancelled(progress.gen)
-            if _nb_retries <= 0:
+            if httpx_mode:
+                import httpx
+                retryable = isinstance(exception, (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError))
+            else:
+                retryable = isinstance(exception, (requests.ConnectionError, requests.ReadTimeout))
+            if not retryable or _nb_retries <= 0:
                 raise
             _nb_retries -= 1
             hf.logger.warning("Download connection interrupted; retrying from byte %s", completed)
             for _ in range(10):
                 time.sleep(0.1)
                 check_download_cancelled(progress.gen)
-            hf.reset_sessions()
+            if close_session is not None:
+                close_session()
     if expected_size is not None and completed != expected_size:
         raise OSError(f"Download size mismatch: expected {expected_size} bytes, received {completed}")
     progress.update(completed, total, force=True)
 
 
-def _xet_get(*, incomplete_path, xet_file_data, headers, expected_size=None, displayed_filename=None, _tqdm_bar=None):
+def _xet_get(*, incomplete_path, xet_file_data, headers, expected_size=None, displayed_filename=None, tqdm_class=None, _tqdm_bar=None):
     try:
         from hf_xet import XetFileInfo, XetSession
     except ImportError as error:
@@ -150,14 +192,18 @@ def _xet_get(*, incomplete_path, xet_file_data, headers, expected_size=None, dis
     session = XetSession()
     waiter = ThreadPoolExecutor(max_workers=1, thread_name_prefix="wangp-xet-download")
     try:
-        connection = hf.refresh_xet_connection_info(file_data=xet_file_data, headers=headers)
+        try:
+            from huggingface_hub.utils._xet import refresh_xet_connection_info
+        except ImportError:
+            from huggingface_hub import refresh_xet_connection_info
+        connection = refresh_xet_connection_info(file_data=xet_file_data, headers=headers)
         check_download_cancelled(progress.gen)
         group = session.new_file_download_group(endpoint=connection.endpoint, token=connection.access_token, token_expiry_unix_secs=connection.expiration_unix_epoch, token_refresh_url=xet_file_data.refresh_route, token_refresh_headers=headers)
         check_download_cancelled(progress.gen)
         handle = group.start_download_file(XetFileInfo(xet_file_data.file_hash, expected_size), str(incomplete_path.absolute()))
         # The blocking wait finalizes native task results; try_result alone does not.
         finished = waiter.submit(group.wait_to_finish)
-        with hf._get_progress_bar_context(desc=displayed_filename or progress.filename or "Downloading", log_level=hf.logger.getEffectiveLevel(), total=expected_size, initial=0, name="huggingface_hub.xet_get", _tqdm_bar=_tqdm_bar) as bar:
+        with hf._get_progress_bar_context(desc=displayed_filename or progress.filename or "Downloading", log_level=hf.logger.getEffectiveLevel(), total=expected_size, initial=0, name="huggingface_hub.xet_get", tqdm_class=tqdm_class, _tqdm_bar=_tqdm_bar) as bar:
             completed = 0
             while True:
                 check_download_cancelled(progress.gen)
@@ -184,6 +230,11 @@ def _xet_get(*, incomplete_path, xet_file_data, headers, expected_size=None, dis
             session.sigint_abort()
         finally:
             waiter.shutdown(wait=True)
+
+
+def _is_xet_failure(exception):
+    text = str(exception).lower()
+    return "cas client error" in text or "file reconstruction error" in text or "xet" in text
 
 
 def install_hf_download_patch():
@@ -219,6 +270,21 @@ def install_hf_download_patch():
             # The original function has closed the file; its caller still owns the HF lock.
             incomplete_path.unlink(missing_ok=True)
             raise
+        except Exception as exception:
+            if not _is_xet_failure(exception):
+                raise
+            # The Xet CAS client can fail mid-transfer through flaky proxies
+            # ("File reconstruction error: CAS Client Error: ..."). Retry the same
+            # file over plain HTTP, which resumes/retries natively.
+            hf.logger.warning("Xet download failed (%s); retrying over HTTP", exception)
+            from huggingface_hub import constants as hf_constants
+            previous = hf_constants.HF_HUB_DISABLE_XET
+            hf_constants.HF_HUB_DISABLE_XET = True
+            try:
+                check_download_cancelled(progress.gen)
+                return original_download(incomplete_path, destination_path, *args, **kwargs)
+            finally:
+                hf_constants.HF_HUB_DISABLE_XET = previous
 
     http_get._wangp_download_patch = True
     hf.http_get = http_get
