@@ -21,7 +21,7 @@ import torch
 
 GB, MB = 2 ** 30, 2 ** 20
 _LIBRARIES = {("win32", "amd64"): "ram_alloc_win_amd64.dll", ("linux", "x86_64"): "ram_alloc_linux_x86_64.so"}
-TORCH_VERSIONS = ((2, 6), (2, 15))  # c10::Allocator, DataPtr and SetAllocator checked identical from 2.6 to the 2.15 development branch
+TORCH_VERSIONS = ((2, 6), (2, 16))  # c10 ABI checked identical from 2.6 to the 2.15 development branch; upper bound widened locally to 2.16 (unverified)
 STATS = ("enabled", "live", "cached", "peak", "allocations", "hits", "fresh", "trims", "fallbacks", "releases", "released_bytes", "reserved")
 _lib, _reason = None, None
 active = False

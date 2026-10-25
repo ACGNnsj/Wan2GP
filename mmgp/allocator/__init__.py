@@ -33,7 +33,7 @@ _PRESSURE_CALLBACK = ctypes.CFUNCTYPE(ctypes.c_int64, ctypes.c_size_t, ctypes.c_
 _OOM_ERROR_LIBRARIES = {("win32", "amd64"): "oom_error_win_amd64.dll", ("linux", "x86_64"): "oom_error_linux_x86_64.so"}
 # PyTorch versions whose c10::Error (members, virtual functions, constructors) was checked identical to the headers the companion was built
 # with (2.10): 2.6 to 2.14 and the development branch 2.15 of 2026-10. Before using another one, compare its c10/util/Exception.h.
-OOM_ERROR_TORCH_VERSIONS = ((2, 6), (2, 15))
+OOM_ERROR_TORCH_VERSIONS = ((2, 6), (2, 16))  # upper bound widened locally to 2.16 (unverified)
 _oom_error = None  # the companion library, kept loaded while the allocator may call it
 _pressure_callback = None  # the ctypes callback, kept alive while the library may call it
 _warmup = threading.local()
