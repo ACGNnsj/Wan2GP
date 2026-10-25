@@ -1,0 +1,242 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# WanGP (Wan2GP) — uv 工程配置
+#
+# 目标环境：Python 3.11 + PyTorch 2.10.0 + CUDA 13.0（NVIDIA RTX 20xx 及以上）
+# 平台：Linux / Windows
+#
+# 用法：
+#   uv sync                          # 创建 .venv 并按本文件安装全部依赖（首次自动下载 Python 3.11）
+#   uv run python wgp.py             # 启动 WanGP
+#   uv run python wgp.py --listen --server-name 0.0.0.0
+#
+# 说明：
+# 1. 依赖与 requirements.txt 一一对应；requirements.txt 继续供 pip / Docker / 一键安装脚本使用。
+# 2. 本文件只覆盖「推荐档」：Python 3.11 + torch 2.10.0 cu134。
+#    GTX 10xx（Python 3.10 + torch 2.7.1 cu128）、AMD ROCm（Python 3.12 + torch 2.13）、
+#    macOS MPS 请按 README / docs/INSTALLATION.md 继续用 requirements.txt 安装。
+# 3. uv 不会读取 requirements.txt 里的 --extra-index-url，这里用
+#    [[tool.uv.index]] + [tool.uv.sources] 等价表达；
+#    这样从 PyTorch 索引装的包不会被“升级”成 PyPI 上的无 CUDA 版本。
+# 4. SageAttention / FlashAttention / GGUF / Nunchaku / Triton 等加速内核不在此安装，
+#    见文件末尾的命令。
+# ═══════════════════════════════════════════════════════════════════════════
+
+[project]
+name = "wangp"
+version = "12.72.0"
+description = "WanGP (Wan2GP) - video generation web UI"
+readme = "README.md"
+requires-python = ">=3.13,<3.14"
+
+dependencies = [
+    # ---- PyTorch（由 PyTorch 官方 cu134 索引提供）----
+    "torch>=2.10.0",
+    "torchvision>=0.25.0",
+    "torchaudio>=2.10.0",
+    "triton",
+    # ---- mmgp（内置目录）所需依赖 ----
+    "optimum-quanto>=0.2.7",
+    "safetensors",
+    "psutil",
+    "filelock",
+    "comfy-kitchen>=0.2.35",
+    # ---- 核心 AI 栈 ----
+    "diffusers>=0.36.0",
+    "transformers<5.2",
+    "tokenizers>=0.20.3",
+    "accelerate>=1.1.1",
+    "tqdm",
+    "imageio",
+    "imageio-ffmpeg",
+    "einops",
+    "rotary-embedding-torch>=0.5.3",
+    "sentencepiece",
+    "tiktoken",
+    "fugashi>=1.2.0",
+    "unidic-lite>=1.0.0",
+    "open_clip_torch>=2.29.0",
+    "numpy>=2.1.2",
+    "num2words>=0.5.14",
+    # ---- 视频与音频 ----
+    "moviepy>=1.0.3",
+    "av",
+    "ffmpeg-python",
+    "pygame>=2.1.0",
+    "sounddevice>=0.4.0",
+    "soundfile",
+    "mutagen",
+    "pyloudnorm",
+    "librosa>=0.11.0",
+    "speechbrain>=1.0.3",
+    "openai-whisper>=20250625",
+    "audio-separator>=0.36.1",
+    "pyannote.audio>=3.3.2",
+    "sherpa-onnx>=1.13.2",
+    "torchcodec>=0.10.0",
+    "einshape>=1.0",
+    "jax",
+    # Flax/Linen 子集已内置在 postprocessing/prismaudio/vendor/flax，
+    # 不通过 pip 安装，避免引入 orbax-checkpoint。
+    # ---- 界面与交互 ----
+    "gradio==5.29.0",
+    "orjson>=3.11.6", # 修复深层嵌套对象序列化时的原生崩溃
+    "dashscope",
+    "loguru",
+    "s3tokenizer",
+    "conformer>=0.3.2",
+    "spacy_pkuseg",
+    "spacy",
+    "gradio_rangeslider",
+    # ---- 视觉与分割 ----
+    "opencv-python>=4.12.0.88",
+    "ultralytics",
+    "scipy",
+    "pycocotools",
+    "segment-anything",
+    "rembg[gpu]>=2.0.65; sys_platform != 'darwin'",
+#    "rembg>=2.0.65; sys_platform == 'darwin'",
+    # onnxruntime-gpu：3.11+ 使用 CUDA 13 的 nightly 轮子（来自 ort-cuda-13-nightly 索引），
+    # 与 torch 2.10.0+cu134 匹配；requirements.txt 里 python<3.11 的旧分支这里不适用。
+    "onnxruntime-gpu>=1.31; sys_platform != 'darwin'",
+#    "onnxruntime>=1.22.0; sys_platform == 'darwin'",
+    "decord; sys_platform != 'darwin'",
+    "timm",
+    "iopath>=0.1.10",
+    # insightface：Windows 用预编译轮子，Linux 用官方 sdist 本地编译（需要 gcc）。
+    "insightface>=0.7.3",
+    "facexlib>=0.3.0",
+    "taichi",
+    "vector-quantize-pytorch>=1.27.19",
+    # ---- 3D 网格（UV 展开、减面、marching cubes）----
+    "xatlas>=0.0.11",
+    "fast-simplification>=0.2.0",
+    "scikit-image>=0.26.0",
+    # ---- Deepy Draw SVG（resvg 光栅化，MIT）----
+    "resvg-py>=0.5.0",
+    # ---- 3D 人体（chumpy / smplfitter：用 GitHub 轮子，避免 sdist 构建隔离问题）----
+    "chumpy",
+    "smplfitter",
+    # ---- 配置与编排 ----
+    "omegaconf",
+    "hydra-core",
+    "easydict",
+    "pydantic>=2.11.10",
+    "mcp<2",
+    # ---- 数学与建模 ----
+    "mir_eval>=0.8.2",
+    "pretty_midi>=0.2.11.post0",
+    "mido>=1.3.3",
+    "symusic>=0.6.0",
+    "torchdiffeq>=0.2.5",
+    "peft>=0.17.0",
+    "matplotlib",
+    "gguf>=0.17.1",
+    "flash-linear-attention>=0.4.1",
+    # ---- 工具库 ----
+    "ftfy",
+    "piexif",
+    "nvidia-ml-py",
+    "misaki",
+    "gitdb>=4.0.12",
+    "gitpython>=3.1.45",
+    "stringzilla>=4.0.14",
+    "xxhash",
+    "munch",
+    "wetext>=0.1.2",
+    "markdown",
+    "apprise>=1.12.0",
+    "keyring>=25.7.0",
+    "huggingface_hub[hf_xet]",
+    "hf_xet>=1.5.2", # Xet 可取消下载所必需
+    "audioread>=3.1.0",
+    "standard-aifc>=3.13.0",
+    "standard-sunau>=3.13.0",
+    "sherpa-onnx-core"
+]
+
+[tool.uv]
+package = false
+# 只在 Linux / Windows 上求解依赖：torch 2.10.0+cu134 没有 macOS 轮子，
+# macOS 请按 README 用 requirements.txt + MPS 安装。
+environments = [
+    "sys_platform == 'linux'",
+#    "sys_platform == 'win32'",
+]
+#python-preference = "only-system"
+override-dependencies = [
+    # 彻底禁用 CPU 版 onnxruntime，防止传递依赖自动拉取它覆盖 onnxruntime-gpu
+    "onnxruntime; sys_platform == 'never'",
+]
+
+[[tool.uv.index]]
+name = "tuna"
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true
+
+# 只用系统 Python（默认 uv 优先使用自己下载/托管的 Python）：
+#   python-preference = "only-system"   # 只用系统解释器，绝不使用 uv 托管版本（可选值：only-managed / managed / system / only-system）
+#   python-downloads   = "never"        # 同时禁止 uv 自动下载 Python（可选值：automatic / manual / never）
+# 注意：本机 /usr/bin 只有 Python 3.14（python3 -> 3.14.4）；开启后 uv 只认与
+# requires-python 匹配的系统解释器，找不到就报 "No interpreter found for Python ..."，
+# 需要先安装对应版本的系统 Python（deadsnakes PPA / pyenv / apt）再打开。
+# 想“优先系统、找不到再回退到托管版本”，用 "system" 而不是 "only-system"。
+# python-preference = "only-system"
+# python-downloads = "never"
+
+# ───────────────────────────── 包索引 ─────────────────────────────
+# 对应 requirements.txt 的 --extra-index-url。
+# explicit = true：只供 [tool.uv.sources] 显式指定的包使用，不会污染其余依赖的解析。
+
+[[tool.uv.index]]
+name = "pytorch-cu134"
+url = "https://download.pytorch.org/whl/nightly/cu134"
+explicit = true
+
+[[tool.uv.index]]
+name = "ort-cuda-13-nightly"
+url = "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ort-cuda-13-nightly/pypi/simple/"
+explicit = true
+
+# ─────────────────────────── 包来源映射 ───────────────────────────
+[tool.uv.sources]
+# torch 三件套固定从 PyTorch cu134 索引安装（否则 PyPI 上的默认轮子不带 CUDA）
+torch = { index = "pytorch-cu134" }
+torchvision = { index = "pytorch-cu134" }
+torchaudio = { index = "pytorch-cu134" }
+triton = { index = "pytorch-cu134" }
+
+# ONNX Runtime GPU 的 CUDA 13 nightly 只在专用索引里
+#onnxruntime-gpu = { index = "ort-cuda-13-nightly", marker = "sys_platform != 'darwin'" }
+
+# insightface：Windows 用预编译轮子；Linux 未指定来源，自动回落到 PyPI（官方 sdist）
+#insightface = { url = "https://github.com/deepbeepmeep/insightface/releases/download/insightface/insightface-0.7.3-cp311-cp311-win_amd64.whl", marker = "sys_platform == 'win32'" }
+
+# 这两个包用 GitHub 上的预编译轮子，避免 sdist 构建隔离问题
+chumpy = { path = "/home/acgmn/github/chumpy-0.71-py3-none-any.whl" }
+#smplfitter = { url = "https://github.com/deepbeepmeep/smplfitter/releases/download/v0.2.10/smplfitter-0.2.10-py3-none-any.whl" }
+
+taichi = { path = "/home/acgmn/taichi-build/taichi-src/dist/taichi-1.7.4-cp313-cp313-linux_x86_64.whl" }
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 可选加速内核（不在 [project.dependencies] 中，按需手动安装）
+#
+# 前提：先 `uv sync` 建好 .venv；在项目根目录执行 `uv pip install` 会自动使用 .venv。
+#
+# Linux + RTX 20xx 及以上（与 setup_config.json 的 RTX_40 档一致）：
+#   uv pip install -U "triton>=3.6,<3.7"
+#   uv pip install --no-deps https://github.com/deepbeepmeep/SageAttention/releases/download/v2.2.0-linux.cg1/sageattention-2.2.0+cu134torch2.10.0.cg1-cp311-cp311-linux_x86_64.whl
+#   uv pip install --no-deps https://github.com/deepbeepmeep/WGPKernels/releases/download/v1.1.2/wgpkernels-1.1.2%2Bcu134-py3-none-linux_x86_64.whl
+#   uv pip install https://github.com/nunchaku-ai/nunchaku/releases/download/v1.2.1/nunchaku-1.2.1+cu13.0torch2.10-cp311-cp311-linux_x86_64.whl
+#   uv pip install --no-deps https://github.com/deepbeepmeep/kernels/releases/download/gguf-v1.0.27/llamacpp_gguf_cuda-1.0.27%2Btorch210cu134py311-cp311-cp311-linux_x86_64.whl
+#
+# 可选（编译较慢 / 更吃显存）：
+#   uv pip install --no-build-isolation flash-attn>=2.8.3.post1          # 需先装好 CUDA Toolkit
+#   uv pip install ninja wheel packaging && uv pip install --no-build-isolation git+https://github.com/woct0rdho/SpargeAttn.git
+#   uv pip install bitsandbytes>=0.49.2
+#
+# Windows（RTX 50xx 可加 wgpkernels / nunchaku / gguf；RTX 20xx-40xx 用 SageAttention 2.2.0）
+# 见 docs/INSTALLATION.md 的 wgp-windows.bat 对应段落。
+#
+# 系统依赖（Linux）：
+#   sudo apt install -y ffmpeg libportaudio2 libgl1 libglib2.0-0 libsndfile1
+# ═══════════════════════════════════════════════════════════════════════════
