@@ -412,22 +412,36 @@ class Qwen3VLTextRotaryEmbedding(nn.Module):
 
     def __init__(self, config: Qwen3VLTextConfig, device=None):
         super().__init__()
-        if hasattr(config, "rope_scaling") and config.rope_scaling is not None:
-            self.rope_type = config.rope_scaling.get("rope_type", "default")
-        else:
-            self.rope_type = "default"
+        rope_params = getattr(config, "rope_parameters", None) or getattr(config, "rope_scaling", None) or {}
+        self.rope_type = rope_params.get("rope_type", "default")
         self.max_seq_len_cached = config.max_position_embeddings
         self.original_max_seq_len = config.max_position_embeddings
 
         self.config = config
-        self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
+        if self.rope_type in ROPE_INIT_FUNCTIONS:
+            self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
+        else:
+            # transformers>=5 removed the "default" entry from ROPE_INIT_FUNCTIONS; compute plain RoPE locally
+            def _default_rope_init_fn(cfg, dev=None):
+                base = getattr(cfg, "rope_theta", None) or rope_params.get("rope_theta", 10000.0)
+                dim = getattr(cfg, "head_dim", None) or cfg.hidden_size // cfg.num_attention_heads
+                return 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float32, device=dev) / dim)), 1.0
+            self.rope_init_fn = _default_rope_init_fn
 
         inv_freq, self.attention_scaling = self.rope_init_fn(self.config, device)
         self.register_buffer("inv_freq", inv_freq, persistent=False)
         self.original_inv_freq = self.inv_freq
-        # self.original_inv_freq, _ = self.rope_init_fn(self.config, device)
 
-        self.mrope_section = (config.rope_scaling or {}).get("mrope_section", [24, 20, 20])
+        self.mrope_section = rope_params.get("mrope_section", [24, 20, 20])
+
+    @staticmethod
+    def compute_default_rope_parameters(config, device=None, seq_len=None):
+        # transformers>=5 calls this on any module whose name contains "RotaryEmbedding" during weight init
+        rope_params = getattr(config, "rope_parameters", None) or getattr(config, "rope_scaling", None) or {}
+        base = getattr(config, "rope_theta", None) or rope_params.get("rope_theta", 10000.0)
+        dim = getattr(config, "head_dim", None) or config.hidden_size // config.num_attention_heads
+        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float32, device=device) / dim))
+        return inv_freq, 1.0
 
     def reset_inv_freq(self) -> None:
         inv_freq, self.attention_scaling = self.rope_init_fn(self.config, None)
@@ -1082,7 +1096,8 @@ class Qwen3VLTextModel(Qwen3VLPreTrainedModel):
 
     def __init__(self, config: Qwen3VLTextConfig):
         super().__init__(config)
-        self.padding_idx = config.pad_token_id
+        # transformers>=5 dropped the PretrainedConfig.pad_token_id default; tolerate configs without it
+        self.padding_idx = getattr(config, "pad_token_id", None)
         self.vocab_size = config.vocab_size
 
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
