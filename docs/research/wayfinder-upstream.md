@@ -61,5 +61,5 @@
 - **U1 已提 PR**：[deepbeepmeep/WanGP#2569](https://github.com/deepbeepmeep/WanGP/pull/2569)（`fix/minimax-h3-vae-tiling`，6 行；本地实测 720p/49f：256=376.0 s、512=363.6 s、关闭=364.8 s，峰值 6593/6330/6214 MiB，差异在噪声内但旋钮现在真的生效）。
 - **U3 已在上游**：`wgp.py:4572` 已有 `if "prefetch_window" in server_config: kwargs["prefetchWindow"] = ...`，本条作废（调研时按 `mmgp/offload.py:6848` 判断，漏看了这层转发）。
 - **U2 已提 PR**：[deepbeepmeep/WanGP#2570](https://github.com/deepbeepmeep/WanGP/pull/2570)（`feat/configurable-vram-budgets`，读 `wgp_config.json` 的 `budgets` 覆盖表；优先级 handler > 用户 > profile 默认，默认行为不变）。
-- **U4 未动**：attention 模式的 GUI 入口仍是小改动，但需要先确认维护者愿不愿意把 `sage2` 暴露成会话设置。
+- **U4 已在上游**：设置页本来就有 `Attention Type` 下拉（`plugins/configuration/plugin.py:406-408`，`choices=attention_modes_choices`），`server_config["attention_mode"]` 也会持久化；本条作废。
 - **U5 未动**：建议先开 issue 问维护者是否接受 `pyproject.toml`（不含 lock、不含本机 path source）。
