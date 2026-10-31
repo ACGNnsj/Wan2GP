@@ -1,6 +1,7 @@
 # Copyright (c) 2026 DeepBeepMeep - part of WanGP, WanGP Community License 2.0 (see LICENSE.txt)
-"""CUDA memory settings applied when WanGP starts, before anything initializes CUDA: the VRAM allocator (Configuration > RAM/VRAM
-Management or --vram-allocator), its debug mode (--vram-debug) and the per-thread stack reserve of the CUDA context; the RAM debug
+"""CUDA memory settings applied when WanGP starts, before anything initializes CUDA: an emulated smaller GPU (--max-vram), a RAM budget (--max-ram) or a
+simulated PC with less RAM (--ram-stress), the VRAM allocator
+(Configuration > RAM/VRAM Management or --vram-allocator), its debug mode (--vram-debug) and the per-thread stack reserve of the CUDA context; the RAM debug
 mode (--ram-debug) and the MMGP RAM allocator (Configuration > RAM/VRAM Management or --ram-allocator); and the folder of the driver's
 compute cache (Configuration > Performance)."""
 import ctypes
@@ -88,6 +89,13 @@ def requested_vram_allocator(argv, config_filename):
 
 
 def apply_startup_settings(argv, config_filename):
+    stress_gb, max_ram = _argv_value(argv, "--ram-stress"), _argv_value(argv, "--max-ram")
+    if stress_gb is not None:  # before mmgp.offload reads the RAM at import; a budget then applies within the simulated PC
+        from mmgp import ram_stress
+        ram_stress.start(float(stress_gb))
+    if max_ram is not None:
+        from mmgp import virtual_gpu
+        virtual_gpu.install_ram(float(max_ram))
     import torch
     ram_allocator = _requested(argv, config_filename, "--ram-allocator", RAM_ALLOCATOR_KEY) or RAM_ALLOCATOR_DEFAULT
     if ram_allocator not in RAM_ALLOCATOR_CHOICES:
@@ -100,10 +108,16 @@ def apply_startup_settings(argv, config_filename):
             print(f"[RAM] MMGP RAM Allocator not available ({error}): PyTorch's CPU allocator is used")
         else:
             print("[RAM] MMGP RAM Allocator: the RAM of freed CPU tensors goes back to the system")
+    max_vram = _argv_value(argv, "--max-vram")
+    if max_vram is not None and torch.cuda.is_available():  # before the VRAM allocator, which takes the emulated card's limit when it installs
+        from mmgp import virtual_gpu
+        virtual_gpu.install(float(max_vram))
     if torch.version.hip is None:
         _apply_compute_cache(argv, config_filename)
     if torch.version.hip is None and torch.cuda.is_available():
         _apply_cuda_settings(argv, config_filename, torch)
+    if max_vram is not None and torch.cuda.is_available() and VRAM_ALLOCATOR not in ("vmm", "vmm_spill"):
+        virtual_gpu.limit_torch_allocator()
     debug_value = _argv_value(argv, "--ram-debug")
     debug_mb = float(debug_value) if debug_value and not debug_value.startswith("-") else 16 if "--ram-debug" in argv else 0
     if debug_mb > 0:

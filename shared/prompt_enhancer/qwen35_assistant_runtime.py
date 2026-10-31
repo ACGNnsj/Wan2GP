@@ -15,6 +15,7 @@ import torch
 
 from shared.llm_engines.lmgp import SamplingParams
 from shared.llm_engines.lmgp.engine.block_manager import BlockManager
+from shared.llm_engines.lmgp.layers.kv_formats import overlay_slots as _kv_overlay_slots
 from shared.llm_engines.lmgp.engine.sequence import Sequence, SequenceStatus
 from shared.prompt_enhancer import qwen35_text
 from shared.prompt_enhancer.streaming import ThrottledStreamEmitter
@@ -319,6 +320,21 @@ def _normalize_tool_call_dict(parsed: dict[str, Any]) -> dict[str, Any] | None:
     return {"name": name, "arguments": arguments}
 
 
+RUNAWAY_MIN_REPEATS, RUNAWAY_MIN_CHARS, RUNAWAY_MAX_PERIOD = 40, 3000, 400  # a tool call ending in this much of one fragment has stopped progressing
+
+
+def repeated_tail(text: str) -> tuple[str, int] | None:
+    """The fragment the end of a text keeps repeating and its count, once the repetition is long enough to be a runaway generation."""
+    text = text[-RUNAWAY_MIN_REPEATS * RUNAWAY_MAX_PERIOD:]
+    for period in range(2, RUNAWAY_MAX_PERIOD + 1):
+        unit, count = text[-period:], 1
+        while text[-(count + 1) * period:-count * period] == unit:
+            count += 1
+        if count >= RUNAWAY_MIN_REPEATS and count * period >= RUNAWAY_MIN_CHARS:
+            return unit, count
+    return None
+
+
 def validate_tool_call_structure(raw_text: str) -> str:
     text = str(raw_text or "")
     markers = _tool_call_markers(text)
@@ -511,6 +527,7 @@ class Qwen35AssistantRuntime:
         self.telemetry_enabled = self.debug_enabled and _DEEPY_TELEMETRY_ENABLED
         self._runtime_extra_tokens = getattr(model, "_prompt_enhancer_thinking_extra_tokens", 0)
         self._assistant_presence_state = None
+        self._repetition_rules = None
         self._nvml_handle = None
         self._nvml_module = None
         self._nvml_failed = False
@@ -996,7 +1013,7 @@ class Qwen35AssistantRuntime:
         llm.reset()
         llm.model_runner.ensure_runtime_ready()
         if llm.config.num_kvcache_blocks > 0 and len(llm.scheduler.block_manager.blocks) != llm.config.num_kvcache_blocks:
-            llm.scheduler.block_manager = BlockManager(llm.config.num_kvcache_blocks, llm.config.kvcache_block_size)
+            llm.scheduler.block_manager = BlockManager(llm.config.num_kvcache_blocks, llm.config.kvcache_block_size, _kv_overlay_slots(llm.config))
         llm.model_runner.reset_generation_state()
         llm.model_runner.call("set_sampling_seed", None if seed is None else int(seed))
         llm.scheduler.waiting.clear()
@@ -1225,6 +1242,18 @@ class Qwen35AssistantRuntime:
             f"prompt_position_ids={self._describe_tensor(prompt_position_ids)} position_offset={int(position_offset or 0)} "
             f"max_new={int(max_new_tokens)} seed={seed} do_sample={bool(do_sample)}"
         )
+        temp, normalized_top_p, normalized_top_k = qwen35_text._normalize_vllm_sampling(do_sample=bool(do_sample), temperature=temperature, top_p=top_p, top_k=top_k)
+        live_engine = getattr(self.model, "_prompt_enhancer_vllm_engine", None)
+        if live_engine is not None and live_engine.has_live_context() and live_engine._llm.can_aside(len(prompt_token_ids) + int(max_new_tokens)):
+            # beside the live context, in the free pages of its cache: its pages stay in place, only its per-sequence state is set aside
+            self._log("Embedded decode beside the live assistant context.")
+            with live_engine._llm.aside():
+                response = live_engine.generate_embedded(prompt_token_ids=[int(token_id) for token_id in prompt_token_ids], prompt_embeds=prompt_embeds, prompt_position_ids=prompt_position_ids,
+                                                         max_tokens=int(max_new_tokens), temperature=temp, top_p=normalized_top_p, top_k=normalized_top_k, cfg_scale=1.0, seed=seed,
+                                                         use_tqdm=True, release_vram_after=False, ignore_eos=False, position_offset=int(position_offset or 0))
+            cleaned = qwen35_text._clean_generated_text("" if response is None else response.get("text", ""))
+            self._log(f"Embedded decode response preview={self._format_preview(cleaned)}")
+            return cleaned
         snapshot = self.snapshot_context() or restore_snapshot
         engine = self._get_engine(
             max_context_tokens=len(prompt_token_ids),
@@ -1306,6 +1335,8 @@ class Qwen35AssistantRuntime:
         seq.repetition_penalty = sampling_params.repetition_penalty
         seq.predictive_penalty = sampling_params.predictive_penalty
         seq.repetition_penalty_start = seq.num_prompt_tokens
+        if seq.repetition_penalty != 1.0:  # compaction summaries copy media ids and file names too
+            self._set_repetition_rules(seq)
         seq.logits_processor = sampling_params.logits_processor
         seq.logits_processor_update_state = sampling_params.logits_processor_update_state
         seq.logits_bias = sampling_params.logits_bias
@@ -1321,6 +1352,18 @@ class Qwen35AssistantRuntime:
         if normalized_phase not in {"thought", "statement", "tool"}:
             raise ValueError(f"Unknown assistant action phase: {phase}")
         return assistant_action_budget_tokens(self.get_max_model_len())
+
+    def _set_repetition_rules(self, seq: Sequence) -> None:
+        """The repetition penalty keeps Deepy's prose and reasoning from looping on words; ids, paths and code are copied, not repeated. Only words
+        are penalized: a space then letters, or letters of a script without ASCII (CJK). Symbols, digits and the pieces glued to them in ids and
+        paths (outputs, _seed, the h of 16h37) never are, and inside code fences, backticks and double quotes the penalty is suspended
+        (shared.llm_engines.lmgp.engine.model_runner). The vocabulary is classified once."""
+        if self._repetition_rules is None:
+            texts = self.tokenizer.batch_decode([[token_id] for token_id in range(len(self.tokenizer))], skip_special_tokens=False, clean_up_tokenization_spaces=False)
+            exempt = frozenset(token_id for token_id, text in enumerate(texts) if not (text.strip().isalpha() and (text[:1] == " " or not text.isascii())))
+            marks = {token_id: text for token_id, text in enumerate(texts) if "`" in text or '"' in text or "\n" in text}
+            self._repetition_rules = exempt, marks
+        seq.repetition_exempt_ids, seq.repetition_span_marks = self._repetition_rules
 
     def _install_action_processors(self, seq: Sequence, phase: str, phase_limit: int, continuing_response: bool) -> None:
         penalty_enabled = phase in {"thought", "statement"}
@@ -1397,8 +1440,12 @@ class Qwen35AssistantRuntime:
         seq.top_p = normalized_top_p
         seq.min_p = qwen35_text._resolve_prompt_min_p(self.model)
         seq.cfg_scale = 1.0
-        seq.repetition_penalty = qwen35_text._resolve_prompt_repetition_penalty(self.model) if apply_repetition_penalty else 1.0
+        # Tool calls are code and JSON, whose brackets, quotes and names repeat by design: penalizing the tokens a call already used tips close choices
+        # to wrong ones (os.makedirs/assets for os.makedirs(assets). Thinking and prose keep it, as they keep the presence penalty.
+        seq.repetition_penalty = qwen35_text._resolve_prompt_repetition_penalty(self.model) if apply_repetition_penalty and phase in {"thought", "statement"} else 1.0
         seq.predictive_penalty = qwen35_text._resolve_predictive_penalty_enabled(self.model)
+        if seq.repetition_penalty != 1.0:
+            self._set_repetition_rules(seq)
         if not resume_action:
             seq.repetition_penalty_start = seq.num_tokens
         seq.logits_bias = qwen35_text._build_suppressed_token_logits_bias(self.model, thinking_enabled=thinking_enabled) if allowed_token_ids is None else self._allowed_tokens_bias(tuple(allowed_token_ids))
@@ -1475,6 +1522,7 @@ class Qwen35AssistantRuntime:
         boundary_tail_tokens = list(seq.completion_token_ids[-boundary_tail_size:]) if boundary_tail_size else []
         telemetry_baseline = self._speculative_telemetry(seq)
         decode_telemetry = self._start_decode_telemetry(seq, f"action={action.phase}")
+        runaway_checked = action.generated_tokens
 
         def finish(stop_reason: str, stop_token_id: int | None = None, current_text: str | None = None) -> AssistantDecodeResult:
             decode_started = time.perf_counter() if decode_telemetry is not None and current_text is None else 0.0
@@ -1548,6 +1596,9 @@ class Qwen35AssistantRuntime:
                     stop_reason = "thought_start"
             if stop_reason is None and any(int(token_id) in stop_token_ids for token_id in sampled_tokens):
                 stop_reason = "tool_call" if action.phase == "tool" else "stop_token"
+            if stop_reason is None and boundary_candidate and action.phase == "tool" and action.generated_tokens - runaway_checked >= 128:
+                runaway_checked = action.generated_tokens
+                stop_reason = "tool_repetition" if repeated_tail(raw_text) else None
             parse_seconds = time.perf_counter() - parse_started if decode_telemetry is not None else 0.0
             self._update_decode_telemetry(decode_telemetry, seq, emitted_tokens, runner_seconds, scheduler_seconds, postprocess_seconds, decode_seconds, parse_seconds, stream_seconds, stream_emitter is not None, stream_callback_called)
             if stop_reason is not None:
@@ -1702,6 +1753,8 @@ class Qwen35AssistantRuntime:
                 "repetition_penalty": None if seq.repetition_penalty is None else float(seq.repetition_penalty),
                 "predictive_penalty": bool(seq.predictive_penalty),
                 "repetition_penalty_start": int(seq.repetition_penalty_start),
+                "overlay_slot": int(seq.overlay_slot),
+                "ring_high": int(seq.ring_high),
             },
             "block_manager": {
                 "block_size": int(llm.scheduler.block_manager.block_size),
@@ -1716,9 +1769,11 @@ class Qwen35AssistantRuntime:
                 "hash_to_block_id": {int(hash_key): int(block_id) for hash_key, block_id in llm.scheduler.block_manager.hash_to_block_id.items()},
                 "free_block_ids": [int(block_id) for block_id in llm.scheduler.block_manager.free_block_ids],
                 "used_block_ids": [int(block_id) for block_id in llm.scheduler.block_manager.used_block_ids],
+                "free_overlay_slots": [int(slot) for slot in llm.scheduler.block_manager.free_overlay_slots],
             },
-            "kv_cache": snapshot_cache(runner.kv_cache, ranges, axis=2, previous=None if previous is None else previous["kv_cache"], reuse=reuse_blocks),
-            "kv_cache_scales": None if not hasattr(runner, "kv_cache_scales") else snapshot_cache(runner.kv_cache_scales, ranges, axis=2, previous=None if previous is None else previous["kv_cache_scales"], reuse=reuse_blocks),
+            "kv_tensors": {name: snapshot_cache(tensor, ranges, axis=axis, previous=None if previous is None else previous["kv_tensors"][name], reuse=reuse_blocks)
+                           for name, (tensor, axis) in runner.kv_snapshot_items().items()},
+            "kv_overlay": runner.snapshot_overlay(seq),
             "linear_states": self._snapshot_linear_states(),
             "speculative_state": runner.snapshot_speculative_state(seq.seq_id, previous=None if previous is None else previous["speculative_state"], reuse_tokens=reuse_tokens) if bool(getattr(self.model, "_prompt_enhancer_speculative_decoding", False)) else None,
             "generation_state": {
@@ -1835,21 +1890,18 @@ class Qwen35AssistantRuntime:
         runner = llm.model_runner
         if not hasattr(runner, "kv_cache"):
             raise RuntimeError("Assistant runtime has no KV cache to restore into.")
-        kv_cache = snapshot.get("kv_cache")
-        if kv_cache is None or kv_cache["shape"] != tuple(runner.kv_cache.shape):
-            saved_shape = None if kv_cache is None else kv_cache["shape"]
-            live_shape = tuple(int(x) for x in runner.kv_cache.shape)
-            self._log(f"Assistant KV cache snapshot mismatch saved_shape={saved_shape} live_shape={live_shape}")
+        saved_tensors = snapshot.get("kv_tensors") or {}
+        live_tensors = runner.kv_snapshot_items()
+        if set(saved_tensors) != set(live_tensors) or any(tuple(saved_tensors[name]["shape"]) != tuple(tensor.shape) for name, (tensor, _axis) in live_tensors.items()):
+            saved_shapes = {name: saved["shape"] for name, saved in saved_tensors.items()}
+            live_shapes = {name: tuple(int(x) for x in tensor.shape) for name, (tensor, _axis) in live_tensors.items()}
+            self._log(f"Assistant KV cache snapshot mismatch saved_shape={saved_shapes} live_shape={live_shapes}")
             raise RuntimeError("Assistant KV cache snapshot shape does not match current runtime.")
         with torch.inference_mode():
             from shared.llm_engines.snapshot_cache import restore_cache
 
-            restore_cache(runner.kv_cache, kv_cache)
-            if hasattr(runner, "kv_cache_scales"):
-                kv_cache_scales = snapshot.get("kv_cache_scales")
-                if kv_cache_scales is None or kv_cache_scales["shape"] != tuple(runner.kv_cache_scales.shape):
-                    raise RuntimeError("Assistant KV cache scale snapshot does not match current runtime.")
-                restore_cache(runner.kv_cache_scales, kv_cache_scales)
+            for name, (tensor, _axis) in live_tensors.items():
+                restore_cache(tensor, saved_tensors[name])
         linear_modules = self._get_linear_state_modules()
         linear_states = snapshot.get("linear_states", [])
         if len(linear_modules) != len(linear_states):
@@ -1863,7 +1915,7 @@ class Qwen35AssistantRuntime:
                 module.conv_state_buffer.copy_(saved_conv)
                 module.recurrent_state_buffer.copy_(saved_recurrent)
         saved_block_manager = snapshot["block_manager"]
-        llm.scheduler.block_manager = BlockManager(len(saved_block_manager["blocks"]), int(saved_block_manager["block_size"]))
+        llm.scheduler.block_manager = BlockManager(len(saved_block_manager["blocks"]), int(saved_block_manager["block_size"]), _kv_overlay_slots(llm.config))
         for block, saved_block in zip(llm.scheduler.block_manager.blocks, saved_block_manager["blocks"]):
             block.ref_count = int(saved_block["ref_count"])
             block.hash = int(saved_block["hash"])
@@ -1871,6 +1923,7 @@ class Qwen35AssistantRuntime:
         llm.scheduler.block_manager.hash_to_block_id = {int(hash_key): int(block_id) for hash_key, block_id in saved_block_manager["hash_to_block_id"].items()}
         llm.scheduler.block_manager.free_block_ids = deque(int(block_id) for block_id in saved_block_manager["free_block_ids"])
         llm.scheduler.block_manager.used_block_ids = set(int(block_id) for block_id in saved_block_manager["used_block_ids"])
+        llm.scheduler.block_manager.free_overlay_slots = deque(int(slot) for slot in saved_block_manager.get("free_overlay_slots", []))
         saved_seq = snapshot["sequence"]
         restored_seq = Sequence([int(token_id) for token_id in saved_seq["token_ids"]], SamplingParams(max_tokens=int(saved_seq["max_tokens"]), ignore_eos=bool(saved_seq["ignore_eos"])))
         restored_seq._assistant_context_id = snapshot["context_id"]
@@ -1887,6 +1940,10 @@ class Qwen35AssistantRuntime:
         restored_seq.repetition_penalty = None if saved_seq["repetition_penalty"] is None else float(saved_seq["repetition_penalty"])
         restored_seq.predictive_penalty = bool(saved_seq["predictive_penalty"])
         restored_seq.repetition_penalty_start = int(saved_seq["repetition_penalty_start"])
+        restored_seq.overlay_slot = int(saved_seq.get("overlay_slot", -1))
+        restored_seq.ring_high = int(saved_seq.get("ring_high", 0))
+        with torch.inference_mode():
+            runner.restore_overlay(restored_seq, snapshot.get("kv_overlay"))
         restored_seq.logits_processor = None
         restored_seq.logits_processor_update_state = None
         llm.scheduler.waiting.clear()

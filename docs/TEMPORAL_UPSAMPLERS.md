@@ -89,8 +89,14 @@ lists registered handlers using `description` and any per-method details from
 `method_descriptions`.
 Each `method_parameters` entry is a list of dictionaries with at least `name`;
 it may also define `type`, `description`, `required`, `default`, `enum`, and a
-queue-setting override named `setting`. These fields are optional so older and
-third-party handlers remain compatible.
+keyword override named `setting`. These fields are optional so older and
+third-party handlers remain compatible. Parameters are declared as for spatial
+upsamplers: `name` is the id of the value in the slot's
+`temporal_postprocessing_parameters` setting, `ui` lists the contexts where the
+inputs below the slot's selector show it, an images parameter reads the reference
+images shared with the spatial slot, and the processor receives each value under
+its `setting` name. See
+[Spatial Upsampler Plugin API](SPATIAL_UPSAMPLERS.md).
 
 ## Runtime Contract
 
@@ -201,6 +207,16 @@ offload_registry.unregister_offloadobj("MyTemporalUpsampler", offloadobj)  # in 
 This lets WanGP track every extension offload object and release all extension
 resources centrally: the toolbar "Unload Models" tool and Configuration plugin
 release button call `offload_registry.release_all()`.
+
+Alternative methods can be available without appearing in the normal dropdown.
+Extracting settings restores the saved method even when the extension currently
+hides it. Selecting another method hides that alternative again. Disabled or
+unavailable methods still follow the usual availability rules.
+
+MMGP-managed temporal models use the shared **Postprocessor VRAM Usage** control
+in Configuration > Extensions: **Minimum** (default), **Manual Choice** (at least
+the processor's minimum), or **Dynamic** preload. Native processors keep their
+own memory requirements.
 
 ---
 

@@ -102,7 +102,8 @@ def install(mode="vmm", large_mb=256, chunk_mb=32, spill=False):
     lib.vmm_set_oom_thrower.argtypes = (ctypes.c_void_p,)
     lib.vmm_set_ram_release.argtypes = (ctypes.c_void_p,)
     lib.vmm_begin_warmup.argtypes = (ctypes.c_int, ctypes.c_ulonglong, ctypes.c_ulonglong, ctypes.c_void_p)
-    lib.vmm_end_warmup.argtypes = (ctypes.c_int, ctypes.c_ulonglong, ctypes.c_ulonglong)
+    lib.vmm_begin_warmup.restype = ctypes.c_ulonglong
+    lib.vmm_end_warmup.argtypes = (ctypes.c_int, ctypes.c_ulonglong, ctypes.c_ulonglong, ctypes.c_ulonglong)
     lib.vmm_pause_warmup.argtypes = (ctypes.c_int,)
     lib.vmm_pause_warmup.restype = ctypes.c_int
     lib.vmm_prepare_reuse.argtypes = (ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int)
@@ -133,6 +134,9 @@ def install(mode="vmm", large_mb=256, chunk_mb=32, spill=False):
     _install_oom_error(lib)
     _lib, active = lib, mode
     _redirect_torch_memory_functions()
+    from .. import virtual_gpu
+    if virtual_gpu.state:  # an emulated smaller card: what it leaves the process
+        set_vram_limit(virtual_gpu.state["limit"])
     from . import ram
     ram._link_vram_allocator()  # the RAM allocator, when installed first, gives its cache back before a spill is refused
 
@@ -173,13 +177,13 @@ def graph_warmup(pool):
         return
     device = torch.cuda.current_device()
     stream = torch.cuda.current_stream(device)
-    _lib.vmm_begin_warmup(device, *pool, stream.cuda_stream)
+    token = _lib.vmm_begin_warmup(device, *pool, stream.cuda_stream)
     _warmup.depth = getattr(_warmup, "depth", 0) + 1
     try:
         yield
     finally:
         _warmup.depth -= 1
-        _lib.vmm_end_warmup(device, *pool)
+        _lib.vmm_end_warmup(device, *pool, token)
 
 
 def pool_live(pool, device=None):

@@ -272,9 +272,9 @@ class ProcessLibrary:
         split = spatial_upsampler_api.split_upsampling_value(value)
         return split[0] if split is not None else value if spatial_upsampler_api.find_upsampler_by_method(value) is not None else ""
 
-    def spatial_upsampler_parameter_state(self, process_name: str, main_state: dict | None = None, user_refs: list[str] | None = None, parameter_values=None) -> dict:
-        method = self.spatial_upsampler_method(process_name, main_state, user_refs)
-        return spatial_upsampler_api.parameter_ui_state(method, spatial_upsampler_api.PARAMETER_UI_MEDIA_FLOW, parameter_values)
+    def spatial_upsampler_parameters(self, process_name: str, main_state: dict | None = None, user_refs: list[str] | None = None) -> list[dict]:
+        """The parameters the process's spatial processor shows in Media Flow (postprocessing.parameter_ui)."""
+        return spatial_upsampler_api.method_parameters(self.spatial_upsampler_method(process_name, main_state, user_refs), ui_context=spatial_upsampler_api.PARAMETER_UI_MEDIA_FLOW)
 
     def target_control_choices(self, process_name: str, main_state: dict | None = None, user_refs: list[str] | None = None) -> list[tuple[str, str]]:
         process_definition = self.process_definition(process_name, main_state, user_refs)

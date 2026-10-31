@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 from copy import deepcopy
 from types import SimpleNamespace
 
+from shared.deepy import plugin_jobs
 from shared.deepy.drivers import GradioGallery
 from shared.deepy.runtime import GenerationRuntime
 from shared.deepy.service import DeepyService
@@ -80,6 +81,7 @@ class HybridService(DeepyService):
         self._host_worker = threading.Thread(target=self._publish_host_changes, name='Deepy UI synchronization', daemon=True)
         self._host_worker.start()
         self.host_changed()
+        plugin_jobs.attach_service(self)
 
     def record_model_form(self, model_type, settings):
         snapshot = deepcopy(settings)
@@ -359,6 +361,7 @@ class HybridService(DeepyService):
         return (gr.update(),) * (3 + 3 * len(STRIP_SOURCES) + 6)
 
     def close(self):
+        plugin_jobs.detach_service(self)
         super().close()
         self._host_dirty.set()
         if threading.current_thread() is not self._host_worker:
@@ -367,8 +370,18 @@ class HybridService(DeepyService):
     @asynccontextmanager
     async def lifespan(self, app, *, auth=None, voice_language=None, https_port=None):
         from shared.deepy.server import create_app
+        from shared.utils.plugins import get_plugin_web_apps
         from starlette.concurrency import run_in_threadpool
         app.mount('/deepy', create_app(self, auth=auth, voice_language=voice_language, https_port=https_port))
+        from shared.apps import server as apps_server
+        apps_server.mount(app, auth.public_url if auth is not None else None)
+        for web_app in get_plugin_web_apps():
+            try:
+                app.mount(web_app.path, web_app.factory())
+                print(f"Plugin web app: {web_app.path}/ ({web_app.plugin_id})")
+            except Exception:
+                print(f"[Plugins] Could not start the web app of plugin '{web_app.plugin_id}':")
+                traceback.print_exc()
         try:
             await run_in_threadpool(self._deps.load_queue_action, None, self._state, SimpleNamespace(target=None))
             self.start_generation()
@@ -411,7 +424,8 @@ def launch_gradio(demo, service, args, **kwargs):
     from shared.authentication.web import GradioStartupMiddleware, WebAuthMiddleware
     from shared.authentication.tls import HTTPSRedirect
     from shared.gradio.proxy_public_url import PublicURLMiddleware
-    middleware = [Middleware(WebAuthMiddleware, auth=auth)]
+    from shared.apps.server import AppFrameGuard
+    middleware = [Middleware(AppFrameGuard), Middleware(WebAuthMiddleware, auth=auth)]
     if auth.public_url is not None:
         middleware.insert(0, Middleware(PublicURLMiddleware, public_url=auth.public_url))
     if https_port is not None:
