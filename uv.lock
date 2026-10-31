@@ -3464,6 +3464,14 @@ wheels = [
 ]
 
 [[package]]
+name = "sageattention"
+version = "2.2.0"
+source = { path = "/home/acgmn/sage2-src/dist/sageattention-2.2.0-cp313-cp313-linux_x86_64.whl" }
+wheels = [
+    { filename = "sageattention-2.2.0-cp313-cp313-linux_x86_64.whl", hash = "sha256:25ff628d00ae155c0f40e23fa507d0f23d25651089ef436d5cd60d46093bef70" },
+]
+
+[[package]]
 name = "samplerate"
 version = "0.1.0"
 source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }
@@ -4501,6 +4509,7 @@ dependencies = [
     { name = "rotary-embedding-torch" },
     { name = "s3tokenizer" },
     { name = "safetensors" },
+    { name = "sageattention" },
     { name = "scikit-image" },
     { name = "scipy" },
     { name = "segment-anything" },
@@ -4609,6 +4618,7 @@ requires-dist = [
     { name = "rotary-embedding-torch", specifier = ">=0.5.3" },
     { name = "s3tokenizer" },
     { name = "safetensors" },
+    { name = "sageattention", path = "/home/acgmn/sage2-src/dist/sageattention-2.2.0-cp313-cp313-linux_x86_64.whl" },
     { name = "scikit-image", specifier = ">=0.26.0" },
     { name = "scipy" },
     { name = "segment-anything" },

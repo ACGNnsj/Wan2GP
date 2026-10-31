@@ -106,6 +106,7 @@ dependencies = [
     "insightface>=0.7.3",
     "facexlib>=0.3.0",
     "taichi",
+    "sageattention>=2.2.0",
     "vector-quantize-pytorch>=1.27.19",
     # ---- 3D 网格（UV 展开、减面、marching cubes）----
     "xatlas>=0.0.11",
@@ -216,6 +217,9 @@ chumpy = { path = "/home/acgmn/github/chumpy-0.71-py3-none-any.whl" }
 #smplfitter = { url = "https://github.com/deepbeepmeep/smplfitter/releases/download/v0.2.10/smplfitter-0.2.10-py3-none-any.whl" }
 
 taichi = { path = "/home/acgmn/taichi-build/taichi-src/dist/taichi-1.7.4-cp313-cp313-linux_x86_64.whl" }
+
+# SageAttention 2（本机从源码编译：thu-ml/SageAttention v2.2.0，sm89 + torch 2.16 需 c++20）
+sageattention = { path = "/home/acgmn/sage2-src/dist/sageattention-2.2.0-cp313-cp313-linux_x86_64.whl" }
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 可选加速内核（不在 [project.dependencies] 中，按需手动安装）
